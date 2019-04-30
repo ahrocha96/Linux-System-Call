@@ -1,0 +1,172 @@
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index f0b1709a5ffb..d9a82fea97f2 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -343,6 +343,10 @@
+ 332	common	statx			__x64_sys_statx
+ 333	common	io_pgetevents		__x64_sys_io_pgetevents
+ 334	common	rseq			__x64_sys_rseq
++335	common	get_access_level	__x64_sys_get_access_level
++336	common	set_access_level	__x64_sys_set_access_level
++
++#added code above; lines 335 & 336
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index a6c699f5ceb4..83c6402f37a3 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1183,6 +1183,11 @@ struct task_struct {
+ 	/* Used by LSM modules for access restriction: */
+ 	void				*security;
+ #endif
++//Turns out you don't need those tags
++//#ifdef CONFIG_ACCESS_LEVEL
++	//added code
++	int			accesslevel;
++//#endif
+ 
+ 	/*
+ 	 * New fields for task_struct should be added above here, so that
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 5c1a0933768e..a2c64021ffee 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -1281,5 +1281,8 @@ static inline long ksys_truncate(const char __user *pathname, loff_t length)
+ {
+ 	return do_sys_truncate(pathname, length);
+ }
+-
++//added code
++//turns out we don't need this
++//asmlinkage long __x64_sys_get_access_level(int pid);
++//asmlinkage long __x64_sys_set_access_level(int pid, int new_level);
+ #endif
+diff --git a/init/main.c b/init/main.c
+index 5e13c544bbf4..8369e3929acb 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -1067,7 +1067,7 @@ static int __ref kernel_init(void *unused)
+ 	mark_readonly();
+ 	system_state = SYSTEM_RUNNING;
+ 	numa_default_policy();
+-
++	pr_info("\n##### Andrew Rocha (UFID: 5329-8151) I'm pretty sure this is right #####\n");
+ 	rcu_end_inkernel_boot();
+ 
+ 	if (ramdisk_execute_command) {
+diff --git a/kernel/fork.c b/kernel/fork.c
+index c21b4e1f29f8..b66d248f2bb8 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1666,6 +1666,10 @@ static __latent_entropy struct task_struct *copy_process(
+ 
+ 	retval = -ENOMEM;
+ 	p = dup_task_struct(current, node);
++	//added code
++	//new initilization location. Needs be initialized after task_struct is duplicated
++	p->accesslevel = 0;
++	
+ 	if (!p)
+ 		goto fork_out;
+ 
+@@ -2106,6 +2110,9 @@ long _do_fork(unsigned long clone_flags,
+ 	struct task_struct *p;
+ 	int trace = 0;
+ 	long nr;
++	//added code
++	//This was the wrong place
++	//int accesslevel = 0;
+ 
+ 	/*
+ 	 * Determine whether and which event to report to ptracer.  When
+diff --git a/kernel/sys.c b/kernel/sys.c
+index af8ced3857b7..4c44b3153b98 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -195,6 +195,84 @@ static int set_one_prio(struct task_struct *p, int niceval, int error)
+ 	return error;
+ }
+ 
++//added code p1 COP4600
++SYSCALL_DEFINE2(set_access_level, int, pid, int, new_level )
++{
++
++	//initializing these structs and ints up here eliminates "ISO C90..." error
++	struct task_struct *currentPCB;
++	struct task_struct *targetPCB;
++	int targetAL;
++	int currentAL;
++	int currentPID;
++	//UID of the current process
++	int currentUID = current_uid().val;
++	bool current_is_superuser = 0;
++	//casts that passed in target PID into a pid_t so we can use it with the task struct
++	pid_t targetPID = (pid_t)pid;
++	if(currentUID == 0)
++	{
++		//UID=0 means they are superuser
++		current_is_superuser = 1;
++	}
++	// get current process pid
++	//couldn't call getpid so just used the code within that syscall
++	currentPID = task_pid_nr(current);
++	//'current' is the current task_struct, passed into many function calls such as getpid
++	currentPCB = current;
++	currentAL = currentPCB->accesslevel;
++
++	// get target process task_struct access level
++	targetPCB = find_task_by_vpid(targetPID);
++	targetAL = targetPCB->accesslevel;
++
++	//if there is no access level change
++	if(targetAL == new_level)
++	{
++		return -1;
++	}
++	//allows us to use the sudo command
++	else if(current_is_superuser == 1)
++	{
++		targetPCB->accesslevel = new_level;
++		targetAL = targetPCB->accesslevel;
++		return targetAL;
++	}
++
++	//Allows a process to lower its own access level
++	else if(currentPID == targetPID && currentAL == targetAL && new_level < currentAL)
++	{
++		targetPCB->accesslevel = new_level;
++		targetAL = targetPCB->accesslevel;
++		return targetAL;
++	}
++	//allows process to change other processes if it has a higher access level, up to its access level
++	else if (new_level <= currentAL && currentAL > targetAL)
++	{
++		targetPCB->accesslevel = new_level;
++		targetAL = targetPCB->accesslevel;
++		return targetAL;
++	}
++	else
++	{
++		return -1;
++	}
++}
++SYSCALL_DEFINE1(get_access_level, int, pid)
++{
++	int targetAL;
++
++	struct task_struct *targetPCB;
++	//Casts pid as a pid_t like we did in set
++	pid_t targetPID = (pid_t)pid;
++	//finds the target task_struct
++	targetPCB = find_task_by_vpid(targetPID);
++	//retrieves accesslevel from the task_struct
++	targetAL = targetPCB->accesslevel;
++
++	return targetAL;
++}
++
+ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
+ {
+ 	struct task_struct *g, *p;
